@@ -1,7 +1,8 @@
 import requests
 import os
 import logging
-from datetime import datetime
+from urllib.parse import urlparse, parse_qs
+from datetime import datetime, timedelta, timezone
 
 class TitanCore:
     def __init__(self):
@@ -92,3 +93,57 @@ class TitanCore:
         except Exception as e:
             self.registrar_log(f"Erro conexão {ip}: {str(e)}", "ERRO")
             return False, f"Erro envio: {str(e)}"
+    
+    def verificar_validade_link(self, url):
+        """
+        Analisa links S3 Presigned e estima a validade.
+        Retorna uma tupla: (bool_valido, mensagem_texto, cor_sugerida)
+        """
+        if not url:
+            return False, 'Link vazio', "#95a5a6" # Cinza
+        
+        try:
+            parsed = urlparse(url)
+            params = parse_qs(parsed.query)
+
+            # Verifica se é um link assinado AWS S3 padrão
+            if 'X-Amz-Date' in params and 'X-Amz-Expires' in params:
+                # Data de Criação (Formato YYYYMMDDTHHMMSSZ)
+                creation_str = params['X-Amz-Expires'][0]
+                creation_dt = datetime.strptime(creation_str, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+
+                # Tempo de Vida (segundos)
+                expires_sec = int(params["X-Amz-Expires"][0])
+
+                # Data de Expiração
+                expiration_dt = creation_dt +  timedelta(seconds=expires_sec)
+
+                # Tempo Restante
+                agora = datetime.now(timezone.utc)
+                restante = expiration_dt - agora
+
+                if restante.total_seconds() > 0:
+                    # Formato tempo restante
+                    horas, resto = divmod(int(restante.total_seconds()), 3600)
+                    minutos, _ = divmod(resto, 60)
+
+                    if horas > 0:
+                        msg = f'Link válido por: {horas}h:{minutos}min'
+                    else:
+                        msg = f'Link válido por: {minutos}min'
+                    return True, msg, '#2ecc71'
+                else:
+                    return False, '⚠️ - Link expirado', '#e74c3c'
+            elif 'Expiration' in params: # Alguns links usam Timestamp direto
+                exp_ts = int(params['Expiration'][0])
+                expiration_dt = datetime.fromtimestamp(exp_ts, tz=timezone.utc)
+                agora = datetime.now(timezone.utc)
+
+                if expiration_dt > agora:
+                    return True, 'Link válido (Timestamp)', '#2ecc71'
+                else:
+                    return False, '⚠️ - Link EXPIRADO', '#e74c3c'
+            else:
+                return True, 'Link Público/Permanente', '#3498db'
+        except Exception as e:
+            return False, 'Erro ao ler link', '#e67e22'
