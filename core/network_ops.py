@@ -78,7 +78,7 @@ class TitanCore:
         
         try:
             self.registrar_log(f"Enviando ordem para {ip}.", "INFO")
-            r = requests.post(api_url, json=payload, timeout=10)
+            r = requests.post(api_url, json=payload, timeout=60)
             
             if r.status_code == 200:
                 resp = r.json()
@@ -108,15 +108,17 @@ class TitanCore:
 
             # Verifica se é um link assinado AWS S3 padrão
             if 'X-Amz-Date' in params and 'X-Amz-Expires' in params:
+                # --- CORREÇÃO AQUI ---
                 # Data de Criação (Formato YYYYMMDDTHHMMSSZ)
-                creation_str = params['X-Amz-Expires'][0]
+                creation_str = params['X-Amz-Date'][0] # Agora pega a Data correta
                 creation_dt = datetime.strptime(creation_str, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+                # ---------------------
 
                 # Tempo de Vida (segundos)
                 expires_sec = int(params["X-Amz-Expires"][0])
 
                 # Data de Expiração
-                expiration_dt = creation_dt +  timedelta(seconds=expires_sec)
+                expiration_dt = creation_dt + timedelta(seconds=expires_sec)
 
                 # Tempo Restante
                 agora = datetime.now(timezone.utc)
@@ -131,9 +133,10 @@ class TitanCore:
                         msg = f'Link válido por: {horas}h:{minutos}min'
                     else:
                         msg = f'Link válido por: {minutos}min'
-                    return True, msg, '#2ecc71'
+                    return True, msg, '#2ecc71' # Verde
                 else:
-                    return False, '⚠️ - Link expirado', '#e74c3c'
+                    return False, '⚠️ - Link EXPIRADO', '#e74c3c' # Vermelho
+            
             elif 'Expiration' in params: # Alguns links usam Timestamp direto
                 exp_ts = int(params['Expiration'][0])
                 expiration_dt = datetime.fromtimestamp(exp_ts, tz=timezone.utc)
@@ -144,6 +147,34 @@ class TitanCore:
                 else:
                     return False, '⚠️ - Link EXPIRADO', '#e74c3c'
             else:
-                return True, 'Link Público/Permanente', '#3498db'
+                return True, 'Link Público/Permanente', '#3498db' # Azul
         except Exception as e:
-            return False, 'Erro ao ler link', '#e67e22'
+            return False, f'Erro ao ler link: {str(e)}', '#e67e22' # Laranja
+    
+    def obter_relatorio_agente(self, ip, sistemas):
+        url = f'http://{ip}:{self.PORTA_AGENTE}/titan/relatorio?sistema={sistemas}'
+        try:
+            r = requests.get(url, timeout=5)
+            if r.status_code == 200:
+                return r.json()
+            return {'erro' : f'Http {r.status_code}'}
+        except Exception as e:
+            return {'erro' : str(e)}
+    
+    def enviar_ordem_abortar(self, ip, nome_processo="Update.exe"):
+        api_url = f"http://{ip}:{self.PORTA_AGENTE}/titan/abortar"
+        payload = {"processo": nome_processo}
+        
+        try:
+            self.registrar_log(f"Enviando ABORTAR para {ip}...", "INFO")
+            r = requests.post(api_url, json=payload, timeout=5)
+            
+            if r.status_code == 200:
+                resp = r.json()
+                msg = resp.get('detalhe', 'Abortado')
+                self.registrar_log(f"Abortado em {ip}: {msg}", "SUCESSO")
+                return True, msg
+            return False, f"Erro Http: {r.status_code}"
+        except Exception as e:
+            self.registrar_log(f"Erro conexão {ip}: {str(e)}", "ERRO")
+            return False, f"Erro envio: {str(e)}"
