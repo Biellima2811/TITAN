@@ -17,7 +17,9 @@ PASTA_BASE = r'C:\TITAN'
 PASTA_DOWNLOAD = r"C:\TITAN\Downloads"
 ARQUIVO_LOG_DEBUG = r"C:\TITAN\titan_debug.log"
 UNRAR_PATH = r"C:\TITAN\UnRAR.exe"
-VERSAO_AGENTE = "v11.2 (Hash Fix)"
+ISQL_PATH = r"C:\Program Files\Firebird\Firebird_2_5\bin\isql.exe"
+# ISQL_PATH = r"C:\Fortes\Firebird_5_0\isql.exe"
+VERSAO_AGENTE = "v13.2 (Final)"
 
 MAPA_SISTEMAS = {
     "AC": r"C:\Atualiza\CloudUp\CloudUpCmd\AC",
@@ -25,6 +27,48 @@ MAPA_SISTEMAS = {
     "PONTO": r"C:\Atualiza\CloudUp\CloudUpCmd\PONTO",
     "PATRIO": r"C:\Atualiza\CloudUp\CloudUpCmd\PATRIO"
 }
+# --- SCRIPT SQL EMBUTIDO (VERIFICAÇÃO DE SAÚDE) ---
+SCRIPT_SQL_CHECK = """
+SET NAMES WIN1252;
+SET HEADING OFF;
+
+-- SUMÁRIO GERAL
+SELECT 'SUMARIO' || '|' || 'Status Geral' || '|' ||
+    CASE
+        WHEN (SELECT COUNT(*) FROM RDB$TRIGGERS WHERE RDB$SYSTEM_FLAG = 0 AND RDB$TRIGGER_INACTIVE = 1) > 0 THEN 'DIAGNOSTICO'
+        WHEN (SELECT COUNT(*) FROM RDB$RELATION_CONSTRAINTS WHERE RDB$CONSTRAINT_TYPE = 'FOREIGN KEY' AND RDB$INDEX_NAME IS NULL) > 0 THEN 'DIAGNOSTICO'
+        WHEN (SELECT COUNT(*) FROM RDB$RELATION_CONSTRAINTS RC JOIN RDB$INDICES IX ON RC.RDB$INDEX_NAME = IX.RDB$INDEX_NAME WHERE IX.RDB$INDEX_INACTIVE = 1) > 0 THEN 'PROBLEMAS'
+        WHEN (SELECT COUNT(*) FROM RDB$PROCEDURES WHERE RDB$SYSTEM_FLAG = 0 AND (RDB$VALID_BLR IS NULL OR RDB$VALID_BLR = 0)) > 0 THEN 'DIAGNOSTICO'
+        WHEN (SELECT COUNT(*) FROM RDB$RELATIONS WHERE RDB$VIEW_SOURCE IS NOT NULL AND RDB$VIEW_BLR IS NULL) > 0 THEN 'DIAGNOSTICO'
+        ELSE 'OK'
+    END FROM RDB$DATABASE;
+
+-- FKs SEM ÍNDICE
+SELECT 'INTEGRIDADE' || '|' || 'FK sem Indice' || '|' || 
+       TRIM(RC.RDB$CONSTRAINT_NAME) || ' na Tabela ' || TRIM(RC.RDB$RELATION_NAME)
+FROM RDB$RELATION_CONSTRAINTS RC
+WHERE RC.RDB$CONSTRAINT_TYPE = 'FOREIGN KEY' AND RC.RDB$INDEX_NAME IS NULL;
+
+-- ÍNDICES INATIVOS
+SELECT 'INTEGRIDADE' || '|' || 'Indice Inativo' || '|' || 
+       TRIM(RC.RDB$CONSTRAINT_NAME) || ' na Tabela ' || TRIM(RC.RDB$RELATION_NAME)
+FROM RDB$RELATION_CONSTRAINTS RC
+JOIN RDB$INDICES IX ON RC.RDB$INDEX_NAME = IX.RDB$INDEX_NAME
+WHERE IX.RDB$INDEX_INACTIVE = 1;
+
+-- TRIGGERS INATIVAS
+SELECT 'LOGICA' || '|' || 'Trigger Inativa' || '|' || 
+       TRIM(T.RDB$TRIGGER_NAME) || ' na Tabela ' || TRIM(T.RDB$RELATION_NAME)
+FROM RDB$TRIGGERS T
+WHERE T.RDB$SYSTEM_FLAG = 0 AND T.RDB$TRIGGER_INACTIVE = 1;
+
+-- OBJETOS INVÁLIDOS
+SELECT 'LOGICA' || '|' || 'Procedure Invalida' || '|' || TRIM(P.RDB$PROCEDURE_NAME)
+FROM RDB$PROCEDURES P
+WHERE P.RDB$SYSTEM_FLAG = 0 AND (P.RDB$VALID_BLR IS NULL OR P.RDB$VALID_BLR = 0);
+
+EXIT;
+"""
 # --- FUNÇÃO DE LOG (Caixa Preta) ---
 def log_debug(msg):
     """Loga no arquivo E na tela (para debug manual)"""
@@ -89,93 +133,122 @@ def contar_clientes(sistema):
         return count, ref
     except: return 0, "Erro Leitura"
 
-def agendar_tarefa_universal(url, nome_arquivo, data_hora, usuario, senha, start_in, sistema):
-    log_debug(f"--- Missao v12.1: {sistema} ---")
+def executar_check_banco(sistema):
+    path_base = MAPA_SISTEMAS.get(sistema.upper())
+    if not path_base: return {"status": "ERRO", "log": "Sistema não mapeado"}
     
-    # GARANTIA 1: Ajusta permissão antes de tudo
+    # Tenta achar o banco lendo o INI
+    banco_path = ""
+    try:
+        ini = os.path.join(path_base, "config.ini")
+        if not os.path.exists(ini): ini = os.path.join(path_base, "Config", "config.ini")
+        with open(ini, 'r', encoding='latin-1') as f:
+            for l in f:
+                if "DatabaseName=" in l:
+                    partes = l.split("=")[1].strip().split(":")
+                    banco_path = partes[-1] if len(partes) > 1 else partes[0]
+                    break
+    except: pass
+
+    # Se não achou no INI, tenta padrão DADOS\SISTEMA.FDB
+    if not banco_path:
+        banco_path = os.path.join(path_base, "DADOS", f"{sistema}.FDB")
+
+    if not os.path.exists(banco_path):
+        return {"status": "ALERTA", "log": f"Banco não encontrado: {banco_path}"}
+
+    # Procura o ISQL (no path configurado ou no sistema)
+    cmd_isql = f'"{ISQL_PATH}"' if os.path.exists(ISQL_PATH) else "isql"
+
+    arquivo_sql = os.path.join(PASTA_BASE, "check_health.sql")
+    try:
+        with open(arquivo_sql, 'w') as f: f.write(SCRIPT_SQL_CHECK)
+        
+        # Executa ISQL
+        cmd = f'{cmd_isql} -user SYSDBA -password masterkey -i "{arquivo_sql}" "{banco_path}"'
+        resultado = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60)
+        
+        status_final = "OK" if "OK" in resultado.stdout and "PROBLEMAS" not in resultado.stdout else "ALERTA"
+        return {"status": status_final, "log": resultado.stdout}
+            
+    except Exception as e:
+        return {"status": "ERRO", "log": str(e)}
+
+def agendar_tarefa_universal(url, nome_arquivo, data_hora, usuario, senha, start_in, sistema, modo="COMPLETO"):
+    log_debug(f"--- Missao v13.2 ({modo}): {sistema} ---")
     ajustar_permissoes()
     
-    if not os.path.exists(PASTA_DOWNLOAD):
-        try: os.makedirs(PASTA_DOWNLOAD)
-        except Exception as e: return False, f"Erro Pasta: {e}"
+    # 1. DOWNLOAD (Só se for COMPLETO)
+    if modo == "COMPLETO":
+        if not os.path.exists(PASTA_DOWNLOAD):
+            try: os.makedirs(PASTA_DOWNLOAD)
+            except Exception as e: return False, f"Erro Pasta: {e}"
+        
+        caminho_arquivo = os.path.join(PASTA_DOWNLOAD, nome_arquivo)
+        try:
+            log_debug(f"Baixando {nome_arquivo}...")
+            r = requests.get(url, stream=True, timeout=300)
+            if r.status_code == 200:
+                with open(caminho_arquivo, 'wb') as f:
+                    for chunk in r.iter_content(chunk_size=8192): f.write(chunk)
+                log_debug("Download OK.")
+            else: return False, f"Erro HTTP {r.status_code}"
+        except Exception as e: return False, f"Erro Download: {e}"
+    else:
+        log_debug("Modo Troca EXE: Download pulado.")
 
-    caminho_arquivo = os.path.join(PASTA_DOWNLOAD, nome_arquivo)
-    
-    # 2. Download
-    try:
-        log_debug(f"Baixando {nome_arquivo}...")
-        r = requests.get(url, stream=True, timeout=300)
-        if r.status_code == 200:
-            with open(caminho_arquivo, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=8192): f.write(chunk)
-            log_debug("Download OK.")
-        else: return False, f"Erro HTTP {r.status_code}"
-    except Exception as e: return False, f"Erro Download: {e}"
-
-    # 3. BAT (Launcher)
-    pasta_destino = start_in
-    if not pasta_destino: pasta_destino = MAPA_SISTEMAS.get(sistema.upper(), r"C:\TITAN")
-
-    eh_rar = nome_arquivo.lower().endswith(".rar")
+    # 2. CRIAR BAT (Launcher)
+    pasta_destino = start_in or MAPA_SISTEMAS.get(sistema.upper(), r"C:\TITAN")
     nome_launcher = f"Launcher_{sistema}_{datetime.now().strftime('%H%M%S')}.bat"
     caminho_launcher = os.path.join(PASTA_BASE, nome_launcher)
+    log_bat = r"%TEMP%\titan_launcher.log" # Log no TEMP do usuário
     
-    # GARANTIA 2: Log do BAT vai para TEMP do usuário (evita erro de acesso)
-    log_bat = r"%TEMP%\titan_launcher.log"
-
-    if eh_rar:
-        raiz_sistema = MAPA_SISTEMAS.get(sistema.upper())
-        caminho_executa = os.path.join(raiz_sistema, "Executa.bat") if raiz_sistema else ""
-        unrar_cmd = f'"{UNRAR_PATH}"'
-        
+    raiz_sis = MAPA_SISTEMAS.get(sistema.upper())
+    exec_bat = os.path.join(raiz_sis, "Executa.bat") if raiz_sis else ""
+    
+    # Se for RAR e COMPLETO, extrai. Se for EXE ou APENAS_EXEC, só roda.
+    if modo == "COMPLETO" and nome_arquivo.lower().endswith(".rar"):
         conteudo_bat = f"""@echo off
-echo [%date% %time%] Inicio Launcher >> "{log_bat}"
-if exist {unrar_cmd} (
-    {unrar_cmd} x -y -o+ "{caminho_arquivo}" "{pasta_destino}\\" >> "{log_bat}"
-) else (
-    echo ERRO: UnRAR nao achado >> "{log_bat}"
-    exit /b 1
+echo [%date% %time%] Inicio >> "{log_bat}"
+"{UNRAR_PATH}" x -y -o+ "{caminho_arquivo}" "{pasta_destino}\\" >> "{log_bat}"
+if exist "{exec_bat}" (
+    cd /d "{raiz_sis}"
+    call "{exec_bat}" >> "{log_bat}"
 )
-if exist "{caminho_executa}" (
-    echo Chamando Executa.bat >> "{log_bat}"
-    cd /d "{raiz_sistema}"
-    call "{caminho_executa}" >> "{log_bat}"
-)
-echo Fim >> "{log_bat}"
 exit
 """
     else:
+        # Modo EXE direto ou Troca de Arquivo (Apenas roda o Executa.bat)
         conteudo_bat = f"""@echo off
-cd /d "{pasta_destino}"
-start "" "{caminho_arquivo}"
+echo [%date% %time%] Inicio Execucao >> "{log_bat}"
+if exist "{exec_bat}" (
+    cd /d "{raiz_sis}"
+    call "{exec_bat}" >> "{log_bat}"
+) else (
+    echo ERRO: Executa.bat nao encontrado >> "{log_bat}"
+)
 exit
 """
-    
+
     try:
         with open(caminho_launcher, 'w') as f: f.write(conteudo_bat)
-    except Exception as e: return False, f"Erro criar BAT: {e}"
+    except Exception as e: return False, f"Erro BAT: {e}"
 
-    # 4. Agendamento
+    # 3. AGENDAMENTO
     try:
-        partes = data_hora.split(" ")
-        d = partes[0]; h = partes[1]
-    except: return False, "Data Invalida"
-
-    nome_task = f"TITAN_{sistema}_{datetime.now().strftime('%d%H%M')}"
-    
-    # Tenta USER
-    cmd_user = (f'schtasks /create /tn "{nome_task}" /tr "{caminho_launcher}" '
-                f'/sc ONCE /sd {d} /st {h} /ru "{usuario}" /rp "{senha}" /rl HIGHEST /f')
-    res = subprocess.run(cmd_user, shell=True, capture_output=True, text=True)
-    if res.returncode == 0: return True, f"Agendado (User): {h}"
-    
-    # Tenta SYSTEM
-    cmd_sys = (f'schtasks /create /tn "{nome_task}" /tr "{caminho_launcher}" '
-               f'/sc ONCE /sd {d} /st {h} /ru SYSTEM /rl HIGHEST /f')
-    res2 = subprocess.run(cmd_sys, shell=True, capture_output=True, text=True)
-    if res2.returncode == 0: return True, f"Agendado (SYSTEM)"
-    
-    return False, f"Falha: {res.stderr.strip()}"
+        d, h = data_hora.split(" ")
+        task = f"TITAN_{sistema}_{datetime.now().strftime('%d%H%M')}"
+        
+        # Tenta USER
+        cmd = f'schtasks /create /tn "{task}" /tr "{caminho_launcher}" /sc ONCE /sd {d} /st {h} /ru "{usuario}" /rp "{senha}" /rl HIGHEST /f'
+        if subprocess.run(cmd, shell=True).returncode == 0: return True, f"Agendado: {h}"
+        
+        # Tenta SYSTEM
+        cmd_sys = f'schtasks /create /tn "{task}" /tr "{caminho_launcher}" /sc ONCE /sd {d} /st {h} /ru SYSTEM /rl HIGHEST /f'
+        if subprocess.run(cmd_sys, shell=True).returncode == 0: return True, "Agendado (SYSTEM)"
+        
+        return False, "Falha Schtasks"
+    except Exception as e: return False, str(e)
 
 def analisar_log_backup(sistema, data_alvo=None):
     caminho_base = MAPA_SISTEMAS.get(sistema.upper())
@@ -226,17 +299,39 @@ def executar():
 
     s, m = agendar_tarefa_universal(
         d.get('url'), d.get('arquivo'), d.get('data_hora'), 
-        d.get('user'), d.get('pass'), start_in_final, sist
+        d.get('user'), d.get('pass'), d.get('start_in'), 
+        d.get('sistema', 'AC'), d.get('modo', 'COMPLETO')
     )
     return jsonify({"resultado": "SUCESSO" if s else "ERRO", "detalhe": m})
 
+@app.route('/titan/check_db', methods=['POST'])
+def check_db():
+    return jsonify(executar_check_banco(request.json.get('sistema', 'AC')))
+
 @app.route('/titan/relatorio', methods=['GET'])
 def relatorio():
-    return jsonify(analisar_log_backup(request.args.get('sistema', 'AC'), request.args.get('data')))
+    # Reusei sua lógica anterior de ler logs
+    path = MAPA_SISTEMAS.get(request.args.get('sistema', 'AC'), "")
+    if not path: return jsonify({"erro": "Path 404"})
+    
+    logs = glob.glob(os.path.join(path, "StatusBackup_*.txt"))
+    if not logs: return jsonify({"erro": "Log 404"})
+    
+    log = max(logs, key=os.path.getctime)
+    t=0; s=0
+    try:
+        with open(log, 'r', encoding='latin-1') as f:
+            for l in f:
+                if "Update '" in l: t+=1
+                if "Success" in l: s+=1 # Simplificado para performance
+        return jsonify({"arquivo": os.path.basename(log), "total": t, "sucessos": s, "porcentagem": round((s/t*100) if t else 0, 1)})
+    except: return jsonify({"erro": "Erro Leitura"})
 
 @app.route('/titan/abortar', methods=['POST'])
 def abortar():
-    return jsonify({"resultado": "ABORTADO", "detalhe": cancelar_missao()})
+    try: subprocess.run('schtasks /delete /tn "TITAN*" /f', shell=True)
+    except: pass
+    return jsonify({"resultado": "ABORTADO", "detalhe": "Tarefas limpas"})
 
 if __name__ == '__main__':
     log_debug(">>> AGENTE INICIANDO NA PORTA 5578 <<<")

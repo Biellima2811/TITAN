@@ -17,6 +17,7 @@ from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email import encoders
 from urllib.parse import urlparse
+from TITAN_Agent import VERSAO_AGENTE
 
 class TitanApp:
     def __init__(self, root):
@@ -51,6 +52,13 @@ class TitanApp:
         self.combo_sys = ttk.Combobox(frame_top, values=["AC", "AG", "PONTO", "PATRIO"], width=8, state="readonly")
         self.combo_sys.current(0)
         self.combo_sys.grid(row=0, column=1, padx=5, sticky="w")
+
+        ttk.Label(frame_top, text='Tipo Serviço:').grid(row=1, column=2, sticky='e')
+        self.combo_tipo = ttk.Combobox(frame_top, values=["1 - Atualização Base (AWS)", "2 - Troca de EXE (Rede Local)"], width=30, state='readonly')
+        self.combo_tipo.current(0)
+        self.combo_tipo.grid(row=1, column=3, padx=5, sticky='w')
+        # Liga a função que esconde/mostra o link AWS
+        self.combo_tipo.bind("<<ComboboxSelected>>", self.toggle_interface_servico)
         
         ttk.Label(frame_top, text="Link AWS:").grid(row=0, column=2, sticky="e")
         self.entry_url = ttk.Entry(frame_top, width=60)
@@ -61,7 +69,7 @@ class TitanApp:
         # === LINHA 1: Status do Link (CORRIGIDO: Agora tem sua própria linha) ===
         self.lbl_link_status = tk.Label(frame_top, text="", font=("Arial", 9, "bold")) 
         # bg=None deixa ele pegar a cor do tema, ou use bg="#f0f0f0" se ficar estranho
-        self.lbl_link_status.grid(row=1, column=3, columnspan=3, sticky="w", padx=5, pady=(0, 5))
+        self.lbl_link_status.grid(row=1, column=5, sticky="w", padx=5, pady=(0, 5))
 
         # === LINHA 2: Usuário, Senha e Pasta (CORRIGIDO: Movido para row=2) ===
         ttk.Label(frame_top, text="Usuário Task:").grid(row=2, column=0, sticky="e", pady=5)
@@ -92,20 +100,33 @@ class TitanApp:
         
         ttk.Label(frame_top, text="(Escalonamento +15min auto)", font=("Arial", 8)).grid(row=3, column=4, sticky="w")
 
-        # --- 2. DEPLOY AUTOMÁTICO ---
-        frame_deploy = ttk.LabelFrame(self.root, text="Instalação Remota", padding=10)
-        frame_deploy.grid(row=1, column=0, sticky="ew", padx=10, pady=5)
-        ttk.Label(frame_deploy, text="Instalar Agente nos servidores listados (Requer Admin)").pack(side="left", padx=10)
-        ttk.Button(frame_deploy, text="🛠️ Instalar Agente Remotamente", command=self.btn_deploy_massa).pack(side="right", padx=10)
+# --- 2. ÁREA CENTRAL (ABAS) ---
+        self.notebook = ttk.Notebook(self.root)
+        # Atenção: Mudei row=2 para caber no seu grid original
+        self.notebook.grid(row=2, column=0, sticky="nsew", padx=10, pady=5)
 
-        # --- 3. TABELA ---
-        frame_mid = ttk.Frame(self.root)
-        frame_mid.grid(row=2, column=0, sticky="nsew", padx=10, pady=5)
-        frame_mid.rowconfigure(0, weight=1)
-        frame_mid.columnconfigure(0, weight=1)
+        # ABA 1: DEPLOY & SCAN (Onde fica sua tabela antiga)
+        self.tab_scan = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_scan, text="📡 Controle de Infra")
+        self.tab_scan.columnconfigure(0, weight=1)
+        self.tab_scan.rowconfigure(1, weight=1) 
+        
+        # Frame Deploy (Movi para dentro da aba)
+        frame_deploy = ttk.LabelFrame(self.tab_scan, text="Manutenção de Agente", padding=5)
+        frame_deploy.grid(row=0, column=0, sticky="ew", padx=5, pady=5)
+        frame_deploy.columnconfigure(1, weight=1)
+
+        ttk.Label(frame_deploy, text="Instalar/Atualizar Agente (Requer Admin)").grid(row=0, column=0, padx=10)
+        ttk.Button(frame_deploy, text="🛠️ Instalar Agente (Massivo)", command=self.btn_deploy_massa).grid(row=0, column=2, padx=10, sticky="e")
+        
+        # Tabela (Agora dentro da Aba 1)
+        frame_tree = ttk.Frame(self.tab_scan)
+        frame_tree.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
+        frame_tree.columnconfigure(0, weight=1)
+        frame_tree.rowconfigure(0, weight=1)
 
         cols = ("IP", "Status", "Cliente", "Ref", "Disco", "RAM", "Missão")
-        self.tree = ttk.Treeview(frame_mid, columns=cols, show="headings")
+        self.tree = ttk.Treeview(frame_tree, columns=cols, show="headings")
         for c in cols: self.tree.heading(c, text=c)
         
         self.tree.column("IP", width=80, anchor='center')
@@ -116,7 +137,7 @@ class TitanApp:
         self.tree.column("RAM", width=60, anchor='center')
         self.tree.column("Missão", width=300, anchor='center')
 
-        scrolly = ttk.Scrollbar(frame_mid, orient="vertical", command=self.tree.yview)
+        scrolly = ttk.Scrollbar(frame_tree, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scrolly.set)
         self.tree.grid(row=0, column=0, sticky="nsew")
         scrolly.grid(row=0, column=1, sticky="ns")
@@ -133,6 +154,22 @@ class TitanApp:
         
         self.txt_log = scrolledtext.ScrolledText(frame_log, height=6, font=("Consolas", 9))
         self.txt_log.grid(row=0, column=0, sticky="ew")
+
+        # ABA 2: SAÚDE DO BANCO (NOVA!)
+        self.tab_db = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_db, text="🏥 Saúde do Banco")
+        self.tab_db.columnconfigure(0, weight=1)
+        self.tab_db.rowconfigure(1, weight=1)
+        
+        frame_db_top = ttk.Frame(self.tab_db, padding=10)
+        frame_db_top.grid(row=0, column=0, sticky="ew")
+        frame_db_top.columnconfigure(1, weight=1)
+
+        ttk.Label(frame_db_top, text="Verificar Integridade (Firebird/SQL)").grid(row=0, column=0, sticky="w")
+        ttk.Button(frame_db_top, text="🩺 Executar Check-up", command=self.btn_check_db).grid(row=0, column=2, sticky="e")
+
+        self.txt_db_log = scrolledtext.ScrolledText(self.tab_db, height=20, font=("Consolas", 9))
+        self.txt_db_log.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
 
         # --- 5. RODAPÉ (CORRIGIDO: Agora com 5 colunas para caber tudo) ---
         frame_bot = ttk.Frame(self.root, padding=10)
@@ -220,6 +257,43 @@ class TitanApp:
             vals = (ip, status_exibicao, res.get('clientes', '-'), res.get('ref', '-'), res.get('disk', '-'), res.get('ram', '-'), res.get('msg', ''))
             self.tree.item(item, values=vals, tags=(tag,))
         self.log_visual(">>> Scan Finalizado <<<")
+    
+    def toggle_interface_servico(self, event):
+        """Esconde o Link AWS se for Modo Local"""
+        tipo = self.combo_tipo.get()
+        if "Rede Local" in tipo:
+            self.entry_url.config(state='disabled')
+            self.lbl_link_status.config(text="Modo Local: Copiará EXE da Central", fg="blue")
+        else:
+            self.entry_url.config(state='normal')
+            self.lbl_link_status.config(text="")
+
+    def btn_check_db(self):
+        """Inicia a verificação de banco"""
+        threading.Thread(target=self.worker_db_check).start()
+
+    def worker_db_check(self):
+        """Thread que chama a API de banco"""
+        items = self.tree.get_children()
+        sis = self.combo_sys.get()
+        self.txt_db_log.delete(1.0, tk.END)
+        self.txt_db_log.insert(tk.END, f"=== INICIANDO CHECK-UP ({sis}) ===\n")
+        
+        for item in items:
+            ip = self.tree.item(item)['values'][0]
+            st = self.tree.item(item)['values'][1]
+            if "OFFLINE" not in st:
+                self.txt_db_log.insert(tk.END, f"\nVerificando {ip}...\n")
+                # Chama a nova função do Core (que adicionaremos depois)
+                res = self.core.verificar_banco(ip, sis)
+                
+                status_icon = "✅" if "OK" in res.get('status','') else "❌"
+                log_detalhe = res.get('log', 'Sem retorno')
+                
+                self.txt_db_log.insert(tk.END, f"Status: {status_icon} {res.get('status')}\n")
+                self.txt_db_log.insert(tk.END, f"{log_detalhe}\n")
+                self.txt_db_log.insert(tk.END, "-"*40 + "\n")
+                self.txt_db_log.see(tk.END)
 
     def btn_disparar(self):
         url = self.entry_url.get()
@@ -459,7 +533,7 @@ class TitanApp:
         menubar.add_cascade(label="Links Planilhas", menu=links_menu)
 
     def show_about(self):
-        versao = "v8.1 (Radiance)"
+        versao = VERSAO_AGENTE
         msg = (f"TITAN COMMAND CENTER\n\n"
                f"Versão do Sistema: {versao}\n"
                f"Desenvolvedor: Gabriel Levi\n\n"
@@ -612,33 +686,25 @@ class TitanApp:
         webbrowser.open(url) # Abre no Chrome/Edge padrão (Mais seguro e rápido)
 
     def janela_config_email(self):
-        # Janela personalizada para pedir senha
         win = Toplevel(self.root)
-        win.title("Configuração Segura de SMTP")
-        win.geometry("400x300")
+        win.title("SMTP Seguro")
+        # Layout corrigido para GRID
+        Label(win, text="E-mail:").grid(row=0, column=0, padx=5, pady=5, sticky='e')
+        e1 = Entry(win, width=30); e1.grid(row=0, column=1, padx=5, pady=5)
         
-        Label(win, text="E-mail Remetente:").pack(pady=5)
-        e_email = Entry(win, width=40); e_email.pack()
+        Label(win, text="Senha:").grid(row=1, column=0, padx=5, pady=5, sticky='e')
+        e2 = Entry(win, show="*", width=30); e2.grid(row=1, column=1, padx=5, pady=5)
         
-        Label(win, text="Senha do E-mail:").pack(pady=5)
-        e_pass = Entry(win, width=40, show="*"); e_pass.pack()
+        Label(win, text="SMTP:").grid(row=2, column=0, padx=5, pady=5, sticky='e')
+        e3 = Entry(win); e3.insert(0,"smtp.gmail.com"); e3.grid(row=2, column=1, padx=5, pady=5, sticky='w')
         
-        Label(win, text="Servidor SMTP (Ex: smtp.gmail.com):").pack(pady=5)
-        e_server = Entry(win, width=40); e_server.insert(0, "smtp.gmail.com"); e_server.pack()
+        Label(win, text="Porta:").grid(row=3, column=0, padx=5, pady=5, sticky='e')
+        e4 = Entry(win); e4.insert(0,"587"); e4.grid(row=3, column=1, padx=5, pady=5, sticky='w')
         
-        Label(win, text="Porta (587 ou 465):").pack(pady=5)
-        e_port = Entry(win, width=10); e_port.insert(0, "587"); e_port.pack()
-
         def salvar():
-            ok = self.security.salvar_credenciais(
-                e_email.get(), e_pass.get(), e_server.get(), e_port.get()
-            )
-            if ok:
-                messagebox.showinfo("Sucesso", "Credenciais Criptografadas e Salvas!")
-                win.destroy()
-            else:
-                messagebox.showerror("Erro", "Falha ao salvar.")
-
-        Button(win, text="💾 Salvar Criptografado", command=salvar, bg="#2ecc71", fg="white").pack(pady=20)
-
+            self.security.salvar_credenciais(e1.get(), e2.get(), e3.get(), e4.get())
+            win.destroy()
+            messagebox.showinfo("OK", "Salvo!")
+        
+        Button(win, text="💾 Salvar", command=salvar, bg="#2ecc71", fg="white").grid(row=4, column=0, columnspan=2, pady=10)
     

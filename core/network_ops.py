@@ -52,20 +52,32 @@ class TitanCore:
             r = requests.get(f"http://{ip}:{self.PORTA_AGENTE}/titan/status?sistema={sistema}", timeout=2)
             if r.status_code == 200:
                 d = r.json()
-                return {"ip": ip, "status": "ONLINE", "version": d.get('version','?'), "hash": d.get('hash'), "clientes": d.get('clientes',0), "ref": d.get('ref','-'), "disk": d.get('disk','?'), "ram": d.get('ram','?')}
+                return {
+                    "ip": ip, "status": "ONLINE", 
+                    "version": d.get('version', '?'), 
+                    "hash": d.get('hash'),
+                    "clientes": d.get('clientes', 0),
+                    "ref": d.get('ref', '-'),
+                    "disk": d.get('disk', '?'), "ram": d.get('ram', '?')
+                }
             return {"ip": ip, "status": "ERRO API", "msg": str(r.status_code)}
         except: return {"ip": ip, "status": "OFFLINE", "msg": "Timeout"}
 
-    def enviar_ordem_agendamento(self, ip, url_aws, nome_arquivo, data_hora, usuario, senha, sistema):
+    def enviar_ordem_agendamento(self, ip, url, arq, data, user, senha, sistema, modo="COMPLETO"):
         api_url = f"http://{ip}:{self.PORTA_AGENTE}/titan/executar"
         
-        # Caminho Padrão Fortes (Isso salva o dia se o Agente estiver confuso)
+        # Caminho padrão calculado (caso o Agente precise de fallback)
         caminho_padrao = rf"C:\Atualiza\CloudUp\CloudUpCmd\{sistema}\Atualizadores\{sistema}"
         
         payload = {
-            "url": url_aws, "arquivo": nome_arquivo, "data_hora": data_hora,
-            "user": usuario, "pass": senha, "sistema": sistema,
-            "start_in": caminho_padrao # <--- CRUCIAL
+            "url": url, 
+            "arquivo": arq, 
+            "data_hora": data,
+            "user": user, 
+            "pass": senha,
+            "sistema": sistema,
+            "start_in": caminho_padrao, # Mantido para compatibilidade
+            "modo": modo # <--- NOVO: Define se baixa (COMPLETO) ou só roda (APENAS_EXEC)
         }
         
         try:
@@ -76,6 +88,20 @@ class TitanCore:
                 else: return False, resp.get('detalhe')
             return False, f"Http {r.status_code}"
         except Exception as e: return False, str(e)
+    
+    def verificar_banco(self, ip, sistema):
+        """NOVO: Chama a rota de check-up de banco do Agente"""
+        try:
+            r = requests.post(
+                f"http://{ip}:{self.PORTA_AGENTE}/titan/check_db", 
+                json={'sistema': sistema}, 
+                timeout=40 # Timeout maior pois o ISQL pode demorar
+            )
+            if r.status_code == 200:
+                return r.json() # Espera {"status": "OK", "log": "..."}
+            return {"status": "ERRO HTTP", "log": f"Status {r.status_code}"}
+        except Exception as e:
+            return {"status": "FALHA CONEXÃO", "log": str(e)}
     
     def verificar_validade_link(self, url):
         """
