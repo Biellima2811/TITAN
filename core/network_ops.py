@@ -48,51 +48,34 @@ class TitanCore:
             return []
 
     def checar_status_agente(self, ip, sistema):
-        url = f"http://{ip}:{self.PORTA_AGENTE}/titan/status?sistema={sistema}"
         try:
-            r = requests.get(url, timeout=2)
+            r = requests.get(f"http://{ip}:{self.PORTA_AGENTE}/titan/status?sistema={sistema}", timeout=2)
             if r.status_code == 200:
-                dados = r.json()
-                return {
-                    "ip" : ip, "status": "ONLINE", 
-                    "clientes" : dados.get('clientes', 0), 
-                    "ref" : dados.get('ref', '-'), 
-                    'disk': dados.get('disk_free_gb', '?'),
-                    'ram' : dados.get('ram_usage', '?'),
-                    "msg" : "Pronto"
-                }
-            return {"ip": ip, "status": "ERRO API", "msg": f"Http {r.status_code}"}
-        except:
-            return {"ip": ip, "status": "OFFLINE", "msg": "Sem resposta"}
+                d = r.json()
+                return {"ip": ip, "status": "ONLINE", "version": d.get('version','?'), "hash": d.get('hash'), "clientes": d.get('clientes',0), "ref": d.get('ref','-'), "disk": d.get('disk','?'), "ram": d.get('ram','?')}
+            return {"ip": ip, "status": "ERRO API", "msg": str(r.status_code)}
+        except: return {"ip": ip, "status": "OFFLINE", "msg": "Timeout"}
 
-    def enviar_ordem_agendamento(self, ip, url_aws, nome_arquivo, data_hora, usuario, senha, start_in):
+    def enviar_ordem_agendamento(self, ip, url_aws, nome_arquivo, data_hora, usuario, senha, sistema):
         api_url = f"http://{ip}:{self.PORTA_AGENTE}/titan/executar"
+        
+        # Caminho Padrão Fortes (Isso salva o dia se o Agente estiver confuso)
+        caminho_padrao = rf"C:\Atualiza\CloudUp\CloudUpCmd\{sistema}\Atualizadores\{sistema}"
+        
         payload = {
-            "url": url_aws, 
-            "arquivo": nome_arquivo, 
-            "data_hora": data_hora,
-            "user": usuario,
-            "pass": senha,
-            "start_in": start_in
+            "url": url_aws, "arquivo": nome_arquivo, "data_hora": data_hora,
+            "user": usuario, "pass": senha, "sistema": sistema,
+            "start_in": caminho_padrao # <--- CRUCIAL
         }
         
         try:
-            self.registrar_log(f"Enviando ordem para {ip}.", "INFO")
             r = requests.post(api_url, json=payload, timeout=60)
-            
             if r.status_code == 200:
                 resp = r.json()
-                if resp.get('resultado') == "SUCESSO":
-                    self.registrar_log(f"Sucesso em {ip}: {resp.get('detalhe')}", 'SUCESSO')
-                    return True, f"Agendado: {resp.get('detalhe')}"
-                else:
-                    msg = resp.get('detalhe')
-                    self.registrar_log(f"Falha agente {ip}: {msg}", "ERRO")
-                    return False, f"Erro Agente: {msg}"
-            return False, f"Erro Http: {r.status_code}"
-        except Exception as e:
-            self.registrar_log(f"Erro conexão {ip}: {str(e)}", "ERRO")
-            return False, f"Erro envio: {str(e)}"
+                if resp.get('resultado') == "SUCESSO": return True, resp.get('detalhe')
+                else: return False, resp.get('detalhe')
+            return False, f"Http {r.status_code}"
+        except Exception as e: return False, str(e)
     
     def verificar_validade_link(self, url):
         """
@@ -151,30 +134,18 @@ class TitanCore:
         except Exception as e:
             return False, f'Erro ao ler link: {str(e)}', '#e67e22' # Laranja
     
-    def obter_relatorio_agente(self, ip, sistemas):
-        url = f'http://{ip}:{self.PORTA_AGENTE}/titan/relatorio?sistema={sistemas}'
+    def obter_relatorio_agente(self, ip, sistema, data=None):
+        url = f"http://{ip}:{self.PORTA_AGENTE}/titan/relatorio?sistema={sistema}"
+        if data: url += f"&data={data}"
         try:
             r = requests.get(url, timeout=5)
-            if r.status_code == 200:
-                return r.json()
-            return {'erro' : f'Http {r.status_code}'}
-        except Exception as e:
-            return {'erro' : str(e)}
+            if r.status_code == 200: return r.json()
+        except: pass
+        return {"erro": "Falha"}
     
-    def enviar_ordem_abortar(self, ip, nome_processo="Update.exe"):
-        api_url = f"http://{ip}:{self.PORTA_AGENTE}/titan/abortar"
-        payload = {"processo": nome_processo}
-        
+    def enviar_ordem_abortar(self, ip):
         try:
-            self.registrar_log(f"Enviando ABORTAR para {ip}...", "INFO")
-            r = requests.post(api_url, json=payload, timeout=5)
-            
-            if r.status_code == 200:
-                resp = r.json()
-                msg = resp.get('detalhe', 'Abortado')
-                self.registrar_log(f"Abortado em {ip}: {msg}", "SUCESSO")
-                return True, msg
-            return False, f"Erro Http: {r.status_code}"
-        except Exception as e:
-            self.registrar_log(f"Erro conexão {ip}: {str(e)}", "ERRO")
-            return False, f"Erro envio: {str(e)}"
+            r = requests.post(f"http://{ip}:{self.PORTA_AGENTE}/titan/abortar", timeout=5)
+            if r.status_code == 200: return True, r.json().get('detalhe')
+        except: pass
+        return False, "Erro"

@@ -11,14 +11,14 @@ import sys
 
 app = Flask(__name__)
 
-# --- CONFIGURAÇÕES DO AGENTE ---
+# --- CONFIGURAÇÕES ---
 PORTA = 5578
 PASTA_BASE = r'C:\TITAN'
 PASTA_DOWNLOAD = r"C:\TITAN\Downloads"
 ARQUIVO_LOG_DEBUG = r"C:\TITAN\titan_debug.log"
 UNRAR_PATH = r"C:\TITAN\UnRAR.exe"
+VERSAO_AGENTE = "v11.2 (Hash Fix)"
 
-# Mapeamento (Ajuste conforme seus servidores)
 MAPA_SISTEMAS = {
     "AC": r"C:\Atualiza\CloudUp\CloudUpCmd\AC",
     "AG": r"C:\Atualiza\CloudUp\CloudUpCmd\AG",
@@ -27,21 +27,57 @@ MAPA_SISTEMAS = {
 }
 # --- FUNÇÃO DE LOG (Caixa Preta) ---
 def log_debug(msg):
+    """Loga no arquivo E na tela (para debug manual)"""
     try:
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        with open(ARQUIVO_LOG_DEBUG, "a", encoding="utf-8") as f:
-            f.write(f"[{timestamp}] {msg}\n")
-    except: pass # Se falhar o log, vida que segue
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        texto = f"[{ts}] {msg}"
+        print(texto)
+        with open(ARQUIVO_LOG_DEBUG, "a", encoding="utf-8") as f: 
+            f.write(texto + "\n")
+    except: pass
+
+def ajustar_permissoes():
+    """Garante que o usuario da tarefa consiga ler o BAT e escrever logs"""
+    try:
+        # Dá controle total para Todos na pasta TITAN (Ambiente controlado/Intranet)
+        # Isso resolve o problema do usuario 'Parceiro' não conseguir ler o Launcher.bat
+        subprocess.run(f'icacls "{PASTA_BASE}" /grant Todos:(OI)(CI)F /t /c /q', shell=True, stdout=subprocess.DEVNULL)
+        log_debug("Permissoes de pasta ajustadas.")
+    except: pass
+
+def get_self_hash():
+    """Calcula Hash com tratamento de erro detalhado"""
+    try:
+        # Tenta descobrir o caminho do executável real
+        caminho = sys.executable
+        
+        # Se não for 'frozen' (compilado), usa o arquivo do script
+        if not getattr(sys, 'frozen', False):
+            caminho = os.path.abspath(__file__)
+            
+        # Proteção extra: se o caminho não existir, tenta argv[0]
+        if not os.path.exists(caminho):
+            caminho = sys.argv[0]
+
+        hash_md5 = hashlib.md5()
+        with open(caminho, 'rb') as f:
+            for chunk in iter(lambda: f.read(4096), b''):
+                hash_md5.update(chunk)
+        return hash_md5.hexdigest()
+    except Exception as e:
+        # AQUI ESTÁ A CORREÇÃO: Logamos o erro para saber o que houve
+        log_debug(f"ERRO GRAVE NO HASH: {str(e)}") 
+        return 'erro_hash'
 
 def contar_clientes(sistema):
     caminho_base = MAPA_SISTEMAS.get(sistema.upper())
-    if not caminho_base: return -1, "Path não mapeado"
-    
-    arquivo_ini = os.path.join(caminho_base, "config.ini")
-    if not os.path.exists(arquivo_ini): return 0, "INI não achado"
-
-    count = 0
-    ref = "N/A"
+    if not caminho_base: return -1, "Path nao mapeado"
+    ini_paths = [os.path.join(caminho_base, "config.ini"), os.path.join(caminho_base, "Config", "config.ini")]
+    arquivo_ini = None
+    for p in ini_paths:
+        if os.path.exists(p): arquivo_ini = p; break
+    if not arquivo_ini: return 0, "INI nao achado"
+    count = 0; ref = "N/A"
     try:
         with open(arquivo_ini, 'r', encoding='latin-1') as f:
             for line in f:
@@ -51,227 +87,158 @@ def contar_clientes(sistema):
                         try: ref = line.split("Customer=")[1].split(",")[0].strip()
                         except: pass
         return count, ref
-    except Exception as e:
-        return 0, f"Erro: {e}"
+    except: return 0, "Erro Leitura"
 
-def agendar_tarefa_avancada(url, nome_arquivo, data_hora, usuario, senha, start_in):
-    log_debug(f"--- Iniciando Missão: {nome_arquivo} ---")
+def agendar_tarefa_universal(url, nome_arquivo, data_hora, usuario, senha, start_in, sistema):
+    log_debug(f"--- Missao v12.1: {sistema} ---")
     
-    if not os.path.exists(PASTA_DOWNLOAD): os.makedirs(PASTA_DOWNLOAD)
-    caminho_arquivo = os.path.join(PASTA_DOWNLOAD, nome_arquivo)
+    # GARANTIA 1: Ajusta permissão antes de tudo
+    ajustar_permissoes()
+    
+    if not os.path.exists(PASTA_DOWNLOAD):
+        try: os.makedirs(PASTA_DOWNLOAD)
+        except Exception as e: return False, f"Erro Pasta: {e}"
 
-    # 1. Download
+    caminho_arquivo = os.path.join(PASTA_DOWNLOAD, nome_arquivo)
+    
+    # 2. Download
     try:
-        # Se for link do S3, ele pode vir com parâmetros (?Signature...), limpamos para logar
-        log_debug(f"Baixando arquivo...") 
-        r = requests.get(url, stream=True, timeout=300) # 5 min timeout para arquivos grandes
+        log_debug(f"Baixando {nome_arquivo}...")
+        r = requests.get(url, stream=True, timeout=300)
         if r.status_code == 200:
             with open(caminho_arquivo, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            log_debug("Download concluído.")
-        else:
-            return False, f"Erro Download HTTP {r.status_code}"
-    except Exception as e:
-        return False, f"Erro Download: {e}"
+                for chunk in r.iter_content(chunk_size=8192): f.write(chunk)
+            log_debug("Download OK.")
+        else: return False, f"Erro HTTP {r.status_code}"
+    except Exception as e: return False, f"Erro Download: {e}"
 
-    # 2. Identificar se é RAR ou EXE
+    # 3. BAT (Launcher)
+    pasta_destino = start_in
+    if not pasta_destino: pasta_destino = MAPA_SISTEMAS.get(sistema.upper(), r"C:\TITAN")
+
     eh_rar = nome_arquivo.lower().endswith(".rar")
+    nome_launcher = f"Launcher_{sistema}_{datetime.now().strftime('%H%M%S')}.bat"
+    caminho_launcher = os.path.join(PASTA_BASE, nome_launcher)
     
-    # Define o script do BAT
-    nome_bat = f"Launcher_{datetime.now().strftime('%H%M%S')}.bat"
-    caminho_bat = os.path.join(PASTA_BASE, nome_bat)
-    
+    # GARANTIA 2: Log do BAT vai para TEMP do usuário (evita erro de acesso)
+    log_bat = r"%TEMP%\titan_launcher.log"
+
     if eh_rar:
-        # --- MODO DE EXTRAÇÃO (OPTIMUS STYLE) ---
-        # Comando: UnRAR x -y (sim para tudo) -o+ (sobrescrever) "ARQUIVO" "DESTINO"
+        raiz_sistema = MAPA_SISTEMAS.get(sistema.upper())
+        caminho_executa = os.path.join(raiz_sistema, "Executa.bat") if raiz_sistema else ""
+        unrar_cmd = f'"{UNRAR_PATH}"'
         
-        # Validação do UnRAR
-        if not os.path.exists(UNRAR_PATH):
-            log_debug("ERRO CRÍTICO: UnRAR.exe não encontrado em C:\\TITAN")
-            return False, "Falta UnRAR.exe no servidor"
-
-        # Se o start_in vier vazio, tenta deduzir, mas ideal é vir da Central
-        if not start_in or start_in == ".":
-            return False, "Pasta de destino (Start In) inválida para extração"
-
-        # Monta o BAT de extração
         conteudo_bat = f"""@echo off
-                            echo Iniciando Extracao TITAN... >> "{ARQUIVO_LOG_DEBUG}"
-                            "{UNRAR_PATH}" x -y -o+ "{caminho_arquivo}" "{start_in}\\" >> "{ARQUIVO_LOG_DEBUG}"
-                            if %errorlevel% neq 0 (
-                            echo FALHA NA EXTRACAO >> "{ARQUIVO_LOG_DEBUG}"
-                            exit /b %errorlevel%
-                            )
-                            echo SUCESSO NA EXTRACAO >> "{ARQUIVO_LOG_DEBUG}"
-                            exit
-                            """
-        log_debug(f"Modo RAR detectado. Extraindo para: {start_in}")
-
+echo [%date% %time%] Inicio Launcher >> "{log_bat}"
+if exist {unrar_cmd} (
+    {unrar_cmd} x -y -o+ "{caminho_arquivo}" "{pasta_destino}\\" >> "{log_bat}"
+) else (
+    echo ERRO: UnRAR nao achado >> "{log_bat}"
+    exit /b 1
+)
+if exist "{caminho_executa}" (
+    echo Chamando Executa.bat >> "{log_bat}"
+    cd /d "{raiz_sistema}"
+    call "{caminho_executa}" >> "{log_bat}"
+)
+echo Fim >> "{log_bat}"
+exit
+"""
     else:
-        # --- MODO EXECUTÁVEL (PADRÃO) ---
         conteudo_bat = f"""@echo off
-                        cd /d "{start_in}"
-                        start "" "{caminho_arquivo}"
-                        exit
-                        """
-        log_debug(f"Modo EXE detectado. Executando em: {start_in}")
-
-    # Salva o BAT
+cd /d "{pasta_destino}"
+start "" "{caminho_arquivo}"
+exit
+"""
+    
     try:
-        with open(caminho_bat, 'w') as f:
-            f.write(conteudo_bat)
-    except Exception as e:
-        return False, f'Erro ao criar BAT: {e}'
+        with open(caminho_launcher, 'w') as f: f.write(conteudo_bat)
+    except Exception as e: return False, f"Erro criar BAT: {e}"
 
-    # 3. Agendamento (Igual para ambos)
+    # 4. Agendamento
     try:
         partes = data_hora.split(" ")
-        data_sch = partes[0]
-        hora_sch = partes[1]
-    except:
-        return False, "Data invalida"
+        d = partes[0]; h = partes[1]
+    except: return False, "Data Invalida"
 
-    nome_task = f"TITAN_Update_{datetime.now().strftime('%d%H%M%S')}"
+    nome_task = f"TITAN_{sistema}_{datetime.now().strftime('%d%H%M')}"
     
-    # Tenta agendar (USER > SYSTEM)
-    cmd_user = (f'schtasks /create /tn "{nome_task}" /tr "{caminho_bat}" '
-                f'/sc ONCE /sd {data_sch} /st {hora_sch} '
-                f'/ru "{usuario}" /rp "{senha}" /rl HIGHEST /f')
-    
+    # Tenta USER
+    cmd_user = (f'schtasks /create /tn "{nome_task}" /tr "{caminho_launcher}" '
+                f'/sc ONCE /sd {d} /st {h} /ru "{usuario}" /rp "{senha}" /rl HIGHEST /f')
     res = subprocess.run(cmd_user, shell=True, capture_output=True, text=True)
+    if res.returncode == 0: return True, f"Agendado (User): {h}"
     
-    if res.returncode == 0:
-        return True, f"Agendado (User): {hora_sch}"
-    else:
-        erro_win = res.stderr.strip()
-        cmd_system = (f'schtasks /create /tn "{nome_task}" /tr "{caminho_bat}" '
-                      f'/sc ONCE /sd {data_sch} /st {hora_sch} '
-                      f'/ru SYSTEM /rl HIGHEST /f')
-        res_sys = subprocess.run(cmd_system, shell=True, capture_output=True, text=True)
-        
-        if res_sys.returncode == 0:
-            return True, f"Agendado (SYSTEM) - Alerta: Senha falhou ({erro_win})"
-        else:
-            return False, f"Falha Total: {erro_win} | {res_sys.stderr.strip()}"
+    # Tenta SYSTEM
+    cmd_sys = (f'schtasks /create /tn "{nome_task}" /tr "{caminho_launcher}" '
+               f'/sc ONCE /sd {d} /st {h} /ru SYSTEM /rl HIGHEST /f')
+    res2 = subprocess.run(cmd_sys, shell=True, capture_output=True, text=True)
+    if res2.returncode == 0: return True, f"Agendado (SYSTEM)"
+    
+    return False, f"Falha: {res.stderr.strip()}"
 
-def analisar_log_backup(sistema):
+def analisar_log_backup(sistema, data_alvo=None):
     caminho_base = MAPA_SISTEMAS.get(sistema.upper())
-    if not caminho_base: return {"erro": "Sistema não mapeado"}
-    hoje_str = datetime.now().strftime("%Y%m%d")
-    padrao = os.path.join(caminho_base, f"StatusBackup_*.txt") 
+    if not caminho_base: return {"erro": "Path nao mapeado"}
+    if data_alvo: padrao = os.path.join(caminho_base, f"StatusBackup_{data_alvo}.txt")
+    else: padrao = os.path.join(caminho_base, f"StatusBackup_*.txt")
     arquivos = glob.glob(padrao)
-    if not arquivos: return {"erro": "Log não encontrado hoje"}
-    arquivo_log = max(arquivos, key=os.path.getctime)
-    total = 0
-    sucessos = 0
-    detalhes = []
+    if not arquivos: return {"erro": "Log nao encontrado"}
+    arquivo_log = arquivos[0] if data_alvo else max(arquivos, key=os.path.getctime)
+    total = 0; sucessos = 0
     try:
         with open(arquivo_log, 'r', encoding='latin-1') as f:
-            linhas = f.readlines()
-        i = 0
-        while i < len(linhas):
-            linha = linhas[i].strip()
-            if "Update '" in linha:
-                total += 1
-                partes = linha.split("Update '")
-                hora_inicio = partes[0].replace(":", "").strip()
-                cliente = partes[1].replace("'", "").strip()
-                status = "Falha"
-                tempo_gasto = "?"
-                if i + 1 < len(linhas):
-                    prox_linha = linhas[i+1].strip()
-                    if "Success" in prox_linha:
-                        status = "Sucesso"
-                        sucessos += 1
-                        hora_fim = prox_linha.split(":")[0].strip()
-                        try:
-                            t1 = datetime.strptime(hora_inicio, "%H%M%S")
-                            t2 = datetime.strptime(hora_fim, "%H%M%S")
-                            delta = t2 - t1
-                            tempo_gasto = f"{delta.seconds}s"
-                        except: pass
-                detalhes.append({"cliente": cliente, "status": status, "tempo": tempo_gasto})
-            i += 1
-        porcentagem = (sucessos / total * 100) if total > 0 else 0
-        return {"arquivo": os.path.basename(arquivo_log), "total": total, "sucessos": sucessos, "falhas": total - sucessos, "porcentagem": round(porcentagem, 1), "detalhes": detalhes}
-    except Exception as e:
-        return {"erro": f"Erro ao ler log: {str(e)}"}
+            for line in f:
+                if "Update '" in line:
+                    total += 1
+                    if "Success" in next(f, ""): sucessos += 1
+        perc = (sucessos/total*100) if total > 0 else 0
+        return {"arquivo": os.path.basename(arquivo_log), "total": total, "sucessos": sucessos, "porcentagem": round(perc, 1)}
+    except Exception as e: return {"erro": str(e)}
 
-def cancelar_missao(nome_processo='Update.exe'):
-    log = []
+def cancelar_missao():
     try:
-        cmd_query = 'schtasks /query /fo CSV /nh'
-        res = subprocess.run(cmd_query, shell=True, capture_output=True, text=True)
-        tarefas_removidas = 0
-        for linha in res.stdout.splitlines():
-            if 'TITAN_Update' in linha:
-                nome_tarefa = linha.split(',')[0].strip('"')
-                subprocess.run(f'schtasks /delete /tn "{nome_tarefa}" /f', shell=True)
-                tarefas_removidas += 1
-        log.append(f'Agendamentos cancelados: {tarefas_removidas}')
-    except Exception as e:
-        log.append(f'Erro ao limpar schtasks: {e}')
-    return " | ".join(log)
-
-def get_self_hash():
-    """Calcula o Hash MD5 do próprio executável"""
-    try:
-        # Se estiver rodando como EXE (frozen) ou Script
-        if getattr(sys, 'frozen', False):
-            caminho = sys.executable
-        else:
-            caminho = __file__
-        
-        hash_md5 = hashlib.md5()
-        with open(caminho, 'rb') as f:
-            for chunk in iter(lambda: f.read(4096), b''):
-                hash_md5.update(chunk)
-        return hash_md5.hexdigest()
-    except:
-        return 'erro_hash'
+        subprocess.run('schtasks /delete /tn "TITAN*" /f', shell=True)
+        return "Tarefas limpas"
+    except: return "Erro"
 
 @app.route('/titan/status', methods=['GET'])
 def status():
     sis = request.args.get('sistema', 'AC')
     qtd, ref = contar_clientes(sis)
-    drive = "D:\\" if os.path.exists("D:\\") else "C:\\"
-    meu_hash = get_self_hash()
-
-    try: free_gb = round(shutil.disk_usage(drive).free / (1024**3), 2)
+    # --- VOLTARAM AS INFORMAÇÕES ---
+    try: free_gb = round(shutil.disk_usage("C:\\").free / (1024**3), 2)
     except: free_gb = 0
     try: ram = psutil.virtual_memory().percent
     except: ram = 0
     return jsonify({
-        "status": "ONLINE", 
-        "version": VERSAO_AGENTE, 
-        "hash": meu_hash, 
-        "clientes": qtd, 
-        "ref": ref, 
-        "disk": free_gb, 
-        "ram": ram
+        "status": "ONLINE", "version": VERSAO_AGENTE, "hash": get_self_hash(),
+        "clientes": qtd, "ref": ref, "disk": free_gb, "ram": ram
     })
 
 @app.route('/titan/executar', methods=['POST'])
 def executar():
-    dados = request.json
-    # Importante: o start_in agora é ONDE VAI EXTRAIR
-    sucesso, msg = agendar_tarefa_avancada(
-        dados.get('url'), dados.get('arquivo'), dados.get('data_hora'), 
-        dados.get('user'), dados.get('pass'), dados.get('start_in')
+    d = request.json
+    sist = d.get('sistema', 'AC')
+    path_calc = os.path.join(MAPA_SISTEMAS.get(sist, r"C:\TITAN"), "Atualizadores", sist)
+    start_in_final = d.get('start_in') 
+    if not start_in_final: start_in_final = path_calc
+
+    s, m = agendar_tarefa_universal(
+        d.get('url'), d.get('arquivo'), d.get('data_hora'), 
+        d.get('user'), d.get('pass'), start_in_final, sist
     )
-    return jsonify({"resultado": "SUCESSO" if sucesso else "ERRO", "detalhe": msg})
+    return jsonify({"resultado": "SUCESSO" if s else "ERRO", "detalhe": m})
 
 @app.route('/titan/relatorio', methods=['GET'])
 def relatorio():
-    sis = request.args.get('sistema', 'AC')
-    dados = analisar_log_backup(sis)
-    return jsonify(dados)
+    return jsonify(analisar_log_backup(request.args.get('sistema', 'AC'), request.args.get('data')))
 
 @app.route('/titan/abortar', methods=['POST'])
 def abortar():
-    msg = cancelar_missao()
-    return jsonify({"resultado": "ABORTADO", "detalhe": msg})
+    return jsonify({"resultado": "ABORTADO", "detalhe": cancelar_missao()})
 
 if __name__ == '__main__':
+    log_debug(">>> AGENTE INICIANDO NA PORTA 5578 <<<")
+    ajustar_permissoes() # Libera pasta ao iniciar
     app.run(host='0.0.0.0', port=PORTA)
